@@ -1,0 +1,30 @@
+<RCC>
+  <qresource prefix="images">
+    <file>images/id-card-svgrepo-com (1).svg</file>
+    <file>images/safebox-bank-svgrepo-com (2).svg</file>
+    <file>images/all_accounts.png</file>
+    <file>images/calendar.png</file>
+    <file>images/diamond.png</file>
+    <file>images/messages.png</file>
+    <file>images/monitor.png</file>
+    <file>images/shop.png</file>
+    <file>images/hyus.png</file>
+    <file>images/ibby.png</file>
+    <file>images/pkle.png</file>
+    <file>images/wrewards.png</file>
+    <file>images/loupe.png</file>
+    <file>images/serch_under_line.png</file>
+    <file>images/book-economy-svgrepo-com (1).svg</file>
+    <file>images/bullhorn-megaphone-svgrepo-com.svg</file>
+    <file>images/diamond-svgrepo-com (1).svg</file>
+    <file>images/handshake-deal-svgrepo-com.svg</file>
+    <file>images/invention-money-svgrepo-com.svg</file>
+    <file>images/menu_button.png</file>
+    <file>images/settings.png</file>
+    <file>images/background.png</file>
+    <file>images/bank.svg</file>
+    <file>images/exit_btn.png</file>
+    <file>images/id-card.svg</file>
+    <file>images/wrap_btn.png</file>
+  </qresource>
+</RCC>
