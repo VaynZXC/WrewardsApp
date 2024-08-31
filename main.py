@@ -1,7 +1,7 @@
 from PySide6 import QtWidgets, QtCore, QtGui
 from PySide6.QtWidgets import QDialog, QCheckBox, QMessageBox, QApplication, QMainWindow, QVBoxLayout, QLabel, QLineEdit, QPushButton, QFrame, QListWidget
-from PySide6.QtWidgets import QListWidgetItem, QWidget, QHBoxLayout, QGraphicsDropShadowEffect, QTextEdit, QComboBox, QSizePolicy, QStackedWidget, QAbstractButton
-from PySide6.QtCore import Qt, QPoint, Signal, QThread, Slot, QTimer, QSize, QObject, QThreadPool, QRunnable, QMutex, QMutexLocker
+from PySide6.QtWidgets import QListWidgetItem, QWidget, QHBoxLayout, QGraphicsDropShadowEffect, QTextEdit, QComboBox, QSizePolicy, QStackedWidget
+from PySide6.QtCore import Qt, QPoint, Signal, QThread, Slot, QTimer, QSize, QObject
 from PySide6.QtGui import QMouseEvent, QFont, QColor, QPainter, QTextOption, QMovie
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementNotInteractableException
 from selenium.webdriver.chrome.service import Service
@@ -11,7 +11,6 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from seleniumwire import undetected_chromedriver as uc
 from selenium import webdriver
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import sys
 import json
 import time
@@ -28,39 +27,18 @@ import psutil
 from datetime import datetime
 import re
 from pywinauto import Desktop
-import shutil
-import chromedriver_autoinstaller
-import queue
+from twocaptcha import TwoCaptcha
 
 from main_window import Ui_MainWindow
 
-debug = True
+current_user_id = None
 
+def get_user_id():
+    return current_user_id
 
-chromedriver_autoinstaller.install()
-CHROMEDRIVER_PATH = '/chromdriver/chromedriver.exe'
+solver = TwoCaptcha('4b457d61d55238c310be16925bbff7f5')
 
-
-class UserManager:
-    _instance = None
-
-    @staticmethod
-    def get_instance():
-        if UserManager._instance is None:
-            UserManager._instance = UserManager()
-        return UserManager._instance
-
-    def __init__(self):
-        if UserManager._instance is not None:
-            raise Exception("This class is a singleton!")
-        self.current_user_id = None
-
-    def set_user_id(self, user_id):
-        self.current_user_id = user_id
-    
-    def get_user_id(self):
-        return self.current_user_id
-
+CHROMEDRIVER_PATH = 'chromdriver/chromedriver.exe'
 
 # Костыли
 class ClickableLabel(QLabel):
@@ -70,7 +48,7 @@ class ClickableLabel(QLabel):
         if event.button() == Qt.LeftButton:
             self.clicked.emit()
         super().mousePressEvent(event)
-      
+        
 class ClickableFrame(QFrame):
     clicked = QtCore.Signal()
 
@@ -191,7 +169,7 @@ class AccountSettingsDialog(QDialog):
         self.setLayout(layout)
 
     def save_changes(self):
-        user_id = UserManager.get_instance().get_user_id()
+        user_id = get_user_id()
         if user_id is None:
             QMessageBox.critical(self, "Error", "User ID is not set. Please login again.")
             return
@@ -322,7 +300,7 @@ class AddAccountDialog(QDialog):
         self.adjustSize()  # Обновляем размер окна после изменения видимости элемента
 
     def save_account(self):
-        user_id = UserManager.get_instance().get_user_id()
+        user_id = get_user_id()
         if user_id is None:
             QMessageBox.critical(self, "Error", "User ID is not set. Please login again.")
             return
@@ -512,6 +490,7 @@ class ShopParserThread(QThread):
         self.product_collected_file = "product_collected.txt"
         self.points_file = "account_points.txt"
         self.driver = None
+        self.set_product_element()
         
     def mark_product_collected(self):
         try:
@@ -578,24 +557,32 @@ class ShopParserThread(QThread):
             self.driver.execute_script("window.open('');")
             second_tab = self.driver.window_handles[1]
             self.driver.switch_to.window(second_tab)
-            self.driver.get(site2)
-            
+            self.driver.set_page_load_timeout(50)
+            try:
+                self.driver.get(site2)
+            except TimeoutException:
+                pass
+
+            #time.sleep(100000)
+
             wait = WebDriverWait(self.driver, 10)
 
-            self.set_product_element()
-
-            # Логинимся в аккаунт
-            try:
-                button = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[text()='Login']")))
-                button.click()
-            except NoSuchElementException:
-                print('Кнопки login не найдено.')
+            #Логинимся в аккаунт
+            for i in range(10):
+                try:
+                    print('Пытаемся нажать на кнопку login.')
+                    button = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[text()='Login']")))
+                    button.click()
+                    break
+                except Exception:
+                    print('Кнопки login не найдено.')
+                    time.sleep(5)
+                    
             try:
                 button = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'Log in via Twitch')]")))
                 button.click()
             except NoSuchElementException:
                 print('Кнопки login2 не найдено.')
-            time.sleep(3)
             
             self.driver.get('https://www.wrewards.com/points-shop')
             
@@ -632,9 +619,9 @@ class ShopParserThread(QThread):
             print(f'Ошибка в методе run() [{self.account_name}] ')
             print(e)
         finally:
-            if self.driver:
-                self.driver.quit()
-                self.driver = None
+            if self.is_running:
+                self.quit()
+                self.is_running = False
 
             
     def get_chromedriver(self, use_proxy=True, user_agent=None):
@@ -653,7 +640,6 @@ class ShopParserThread(QThread):
             chrome_options.add_argument('--no-sandbox')
             chrome_options.add_argument('--disable-gpu')
             chrome_options.add_argument('--disable-dev-shm-usage')
-            chrome_options.add_argument('--disable-search-engine-choice-screen')
 
             if user_agent:
                 chrome_options.add_argument(f'--user-agent={user_agent}')
@@ -677,6 +663,7 @@ class ShopParserThread(QThread):
                 driver = uc.Chrome(options=chrome_options, seleniumwire_options=wire_options)
             else:
                 driver = uc.Chrome(options=chrome_options)
+                
             driver.set_window_size(1650, 900)
             return driver
         except Exception as e:
@@ -896,7 +883,7 @@ class ShopParserWindow(QMainWindow):
         
 
     def load_accounts(self):
-        user_id = UserManager.get_instance().get_user_id()
+        user_id = get_user_id()
         if user_id is None:
             print("User ID is not set. Cannot load accounts.")
             return
@@ -943,25 +930,21 @@ class ShopParserWindow(QMainWindow):
         window_geometry.moveCenter(center_point)
         self.move(window_geometry.topLeft())      
         
-  
-import threading   
-driver_lock = threading.Lock()
      
-class TaskSignals(QObject):
-    finished = Signal(str)
-    
 # Парсер календаря
-class CalendarParserTask(QRunnable):
-    def __init__(self, account_name, proxy, twitch_cookies):
-        super().__init__()
+class CalendarParserThread(QThread):
+    finished = Signal(str)
+
+    def __init__(self, account_name, proxy, twitch_cookies, stop_event, parent=None):
+        super(CalendarParserThread, self).__init__(parent)
         self.account_name = account_name
         self.account_proxy = proxy
         self.twitch_cookies = twitch_cookies
         self.is_running = True
+        self.stop_event = stop_event
         self.rewards_file = "collected_rewards.txt"
         self.points_file = "account_points.txt"
         self.driver = None
-        self.signals = TaskSignals()
         
     def has_collected_reward(self):
         try:
@@ -1012,184 +995,221 @@ class CalendarParserTask(QRunnable):
         except Exception as e:
             print(f'Ошибка при сохранении поинтов для {account_name}: {e}')
 
-    @Slot()
     def run(self):
-        test = False
-        if test:
-            try:
-                self.driver = self.get_chromedriver(
-                        use_proxy = True,
-                        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, Like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                    )   
-                    
-                if not self.driver:
-                    print(f'Не удалось инициализировать драйвер Chrome [{self.account_name}]')
-                    #self.finished.emit(self.account_name)
-                    return
-                
-                time.sleep(5)
-                print(f'Успешно собрал календарь {self.account_name}')
-            except Exception as e:
-                print(e)
-            finally:
-                self.signals.finished.emit(self.account_name)
-                if self.driver:
-                    self.driver.quit()
-                    self.driver = None
-            
-            
-            
-            
-        else:
-            if self.has_collected_reward():
-                print(f'Аккаунт {self.account_name} уже забрал календарь сегодня.')
-                self.signals.finished.emit(self.account_name)
+        if self.has_collected_reward():
+            print(f'Аккаунт {self.account_name} уже забрал календарь сегодня.')
+            self.finished.emit(self.account_name)
+            return
+        
+        try: 
+            self.driver = self.get_chromedriver(
+                use_proxy = True,
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, Like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            )   
+            if not self.driver:
+                print(f'Не удалось инициализировать драйвер Chrome [{self.account_name}]')
+                self.finished.emit(self.account_name)
                 return
-            
-            try: 
-                self.driver = self.get_chromedriver(
-                    use_proxy = True,
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, Like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                )   
-                
-                if not self.driver:
-                    print(f'Не удалось инициализировать драйвер Chrome [{self.account_name}]')
-                    self.signals.finished.emit(self.account_name)
-                    return
 
-                site1 = f'https://www.twitch.tv/kishimy2'
-                site2 = f'https://www.wrewards.com'
-                
-                self.driver.get(site1)
-                self.add_cookies()
-                self.driver.execute_script("window.open('');")
-                second_tab = self.driver.window_handles[1]
-                self.driver.switch_to.window(second_tab)
+            site1 = f'https://www.twitch.tv/kishimy2'
+            site2 = f'https://www.wrewards.com'
+            
+            self.driver.get(site1)
+            self.add_cookies()
+            
+            self.driver.execute_script("window.open('');")
+            second_tab = self.driver.window_handles[1]
+            self.driver.switch_to.window(second_tab)
+            self.driver.set_page_load_timeout(50)
+            try:
                 self.driver.get(site2)
-                #print(f'Сайт открыт {self.account_name}')
-                
-                wait = WebDriverWait(self.driver, 10)
-                
-                # Логинимся в аккаунт
+            except TimeoutException:
+                pass
+
+            #time.sleep(100000)
+
+            wait = WebDriverWait(self.driver, 10)
+
+            #Логинимся в аккаунт
+            for i in range(10):
                 try:
+                    print('Пытаемся нажать на кнопку login.')
                     button = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[text()='Login']")))
                     button.click()
-                except NoSuchElementException:
+                    break
+                except Exception:
                     print('Кнопки login не найдено.')
-                try:
-                    button = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'Log in via Twitch')]")))
-                    button.click()
-                except NoSuchElementException:
-                    print('Кнопки login2 не найдено.')
-                
-                #print(f'Залогинился {self.account_name}')
-                self.driver.get('https://www.wrewards.com/advent-calendar')
-                
-                try:
-                    banner = wait.until(EC.element_to_be_clickable((By.CLASS_NAME, 'cookie-banner-button')))
-                    self.driver.execute_script("arguments[0].click();", banner)
-                except NoSuchElementException:
-                    pass
+                    time.sleep(5)
                     
-                try:
-                    balance = wait.until(EC.element_to_be_clickable((By.XPATH, "//span[text()='Balance']")))
-                    self.driver.execute_script("arguments[0].scrollIntoView(true);", balance)
-                    balance.click()
-                    
-                    child_element = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'W-Points')]")))
-                    parent_element = child_element.find_element(By.XPATH, "./..")
-                    if parent_element:
-                        points_text = parent_element.text
-                        self.points = re.search(r'\d[\d,]*', points_text).group()
-                        self.save_points(self.account_name, self.points)
-                        
-                except NoSuchElementException:
-                    print(f'Элемент для просмотра поинтов не найден {self.account_name}.')
-                except Exception as e:
-                    print(e)
-                    print(f'Не получилось посмотреть поинты на аккаунте {self.account_name}.')
-                #print(f'Проверил пониты {self.account_name}')
-                    
-                try:  
-                    time.sleep(3)
-                    flip_card = self.driver.find_element(By.CLASS_NAME, 'react-flip-card')
-                    self.driver.execute_script("arguments[0].scrollIntoView(true);", flip_card)
-                    time.sleep(3)
-                    flip_card.click()
-                    after_menu = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[text()='Claim raffle entry']")))
-                    if after_menu:
-                        print(f'Акканут {self.account_name} забрал календарь. {self.points}')
-                        self.mark_reward_collected()
-                    time.sleep(3)
-                except NoSuchElementException:
-                    if self.points:
-                        print(f'Акканут {self.account_name} уже забирал календарь сегодня. {self.points} поинтов.')
-                    else:
-                        print(f'Акканут {self.account_name} уже забирал календарь сегодня.')
-                    self.mark_reward_collected()
-
-            except Exception as e:
-                print(f'Ошибка в методе run() [{self.account_name}] ')
-                print(e)
-            finally:
-                self.signals.finished.emit(self.account_name)
-                if self.driver:
-                    self.driver.quit()
-                    self.driver = None
+            try:
+                button = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'Log in via Twitch')]")))
+                button.click()
+            except NoSuchElementException:
+                print('Кнопки login2 не найдено.')
             
+            self.driver.get('https://www.wrewards.com/advent-calendar')
+            
+            try:
+                banner = wait.until(EC.element_to_be_clickable((By.CLASS_NAME, 'cookie-banner-button')))
+                self.driver.execute_script("arguments[0].click();", banner)
+            except NoSuchElementException:
+                pass
+                
+            try:
+                balance = wait.until(EC.element_to_be_clickable((By.XPATH, "//span[text()='Balance']")))
+                self.driver.execute_script("arguments[0].scrollIntoView(true);", balance)
+                balance.click()
+                
+                child_element = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'W-Points')]")))
+                parent_element = child_element.find_element(By.XPATH, "./..")
+                if parent_element:
+                    points_text = parent_element.text
+                    self.points = re.search(r'\d[\d,]*', points_text).group()
+                    self.save_points(self.account_name, self.points)
+                    
+            except NoSuchElementException:
+                print(f'Элемент для просмотра поинтов не найден {self.account_name}.')
+            except Exception as e:
+                print(e)
+                print(f'Не получилось посмотреть поинты на аккаунте {self.account_name}.')
+                
+            try:  
+                time.sleep(3)
+                flip_card = self.driver.find_element(By.CLASS_NAME, 'react-flip-card')
+                self.driver.execute_script("arguments[0].scrollIntoView(true);", flip_card)
+                time.sleep(3)
+                flip_card.click()
+                
+                #Проходим капчу
+                time.sleep(10)
+                print('Проходим капчу.')
+                try:
+                    # Переключаемся на iframe с капчей
+                    captcha_iframe = self.driver.find_element(By.CSS_SELECTOR, "iframe[title='reCAPTCHA']")
+                    self.driver.switch_to.frame(captcha_iframe)
+                    print('Переключились на iframe с капчей.')
+                    
+                    # Теперь ищем и нажимаем на капчу
+                    captcha_checkbox = self.driver.find_element(By.CSS_SELECTOR, "div.recaptcha-checkbox-border")
+                    captcha_checkbox.click()
+                    print('Кликнули на чекбокс капчи.')
+                    
+                    # Возвращаемся обратно в основной контекст
+                    self.driver.switch_to.default_content()
+                except NoSuchElementException as e:
+                    print(f'Элемент не найден: {e}')
+                except Exception as e:
+                    print(f'Произошла ошибка при работе с капчей: {e}')
+                
+                time.sleep(5)
+                for i in range(10):
+                    try:
+                        print(f'Попытка {i}')
+                        self.solve_captcha()
+                        break
+                    except NoSuchElementException:
+                        print('Не удалось найти кнопку для капчи.')
+                        time.sleep(5)
+                    except Exception as e:
+                        print(f'Не удалось обойти капчу. {e}') 
+                        time.sleep(5)
+                
+                time.sleep(100000)
+                after_menu = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[text()='Claim raffle entry']")))
+                if after_menu:
+                    print(f'Акканут {self.account_name} забрал календарь. {self.points}')
+                    self.mark_reward_collected()
+                time.sleep(3)
+            except NoSuchElementException:
+                print(f'Акканут {self.account_name} уже забирал календарь сегодня. {self.points} поинтов.')
+                self.mark_reward_collected()
+
+        except Exception as e:
+            print(f'Ошибка в методе run() [{self.account_name}] ')
+            print(e)
+        finally:
+            self.stop()
+            self.finished.emit(self.account_name)
             
     def get_chromedriver(self, use_proxy=True, user_agent=None):
-        global driver_lock
-        with driver_lock:
-            try:
-                chrome_options = uc.ChromeOptions()
-                chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-                chrome_options.add_argument('--incognito')
-                chrome_options.add_argument('--disable-infobars')
-                chrome_options.add_argument('--disable-notifications')
-                chrome_options.add_argument('--disable-popup-blocking')
-                chrome_options.add_argument('--disable-web-security')
-                chrome_options.add_argument('--allow-running-insecure-content')
-                chrome_options.add_argument('--disable-extensions')
-                chrome_options.add_argument('--profile-directory=Default')
-                chrome_options.add_argument('--ignore-certificate-errors')
-                chrome_options.add_argument('--no-sandbox')
-                chrome_options.add_argument('--disable-gpu')
-                chrome_options.add_argument('--disable-dev-shm-usage')
-                chrome_options.add_argument('--disable-search-engine-choice-screen')
-                #chrome_options.add_argument("--headless")
+        try:
+            chrome_options = uc.ChromeOptions()
+            chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+            chrome_options.add_argument('--incognito')
+            chrome_options.add_argument('--disable-infobars')
+            chrome_options.add_argument('--disable-notifications')
+            chrome_options.add_argument('--disable-popup-blocking')
+            chrome_options.add_argument('--disable-web-security')
+            chrome_options.add_argument('--allow-running-insecure-content')
+            chrome_options.add_argument('--disable-extensions')
+            chrome_options.add_argument('--profile-directory=Default')
+            chrome_options.add_argument('--ignore-certificate-errors')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--disable-dev-shm-usage')
 
-                if user_agent:
-                    chrome_options.add_argument(f'--user-agent={user_agent}')
-                    
-                if use_proxy and self.account_proxy:  
-                    split_proxy = self.account_proxy.split(':')
-                    PROXY_HOST = split_proxy[0]
-                    PROXY_PORT = split_proxy[1]
-                    PROXY_USER = split_proxy[2]
-                    PROXY_PASS = split_proxy[3]
-                    wire_options = {
-                            'proxy': {
-                                'https': f'https://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}',
-                            }
+            if user_agent:
+                chrome_options.add_argument(f'--user-agent={user_agent}')
+
+            if use_proxy and self.account_proxy:  
+                split_proxy = self.account_proxy.split(':')
+                PROXY_HOST = split_proxy[0]
+                PROXY_PORT = split_proxy[1]
+                PROXY_USER = split_proxy[2]
+                PROXY_PASS = split_proxy[3]
+                wire_options = {
+                        'proxy': {
+                            'https': f'https://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}',
                         }
-                else:
-                    print(f'Подключите прокси к аккаунту {self.account_name}')
-                    
-                #user_data_dir = tempfile.mkdtemp()
-                #chrome_options.add_argument(f'--user-data-dir={user_data_dir}')
+                    }
                 
-                if self.account_proxy:
-                    driver = uc.Chrome(options=chrome_options, seleniumwire_options=wire_options)
-                else:
-                    driver = uc.Chrome(options=chrome_options)
-                driver.set_window_size(1650, 900)
-                print(f'{self.account_name} запушен')
-                return driver
-            except Exception as e:
-                print(f'Ошибка при инициализации Chromedriver: {e}')        
-                return None 
+            user_data_dir = tempfile.mkdtemp()
+            chrome_options.add_argument(f'--user-data-dir={user_data_dir}')
+
+            driver = uc.Chrome(options=chrome_options, seleniumwire_options=wire_options)
+            driver.set_window_size(1650, 900)
+            return driver
+        except Exception as e:
+            print(f'Ошибка при инициализации Chromedriver: {e}')        
+            return None 
     
+    def solve_captcha(self):
+        try:
+            # Ждём некоторое время, чтобы капча загрузилась
+            time.sleep(2)
+
+            # Получаем sitekey капчи
+            sitekey_element = self.driver.find_element(By.CSS_SELECTOR, "iframe")
+            print('Нашли sitekey_element')
+            sitekey = sitekey_element.get_attribute("src").split("k=")[1].split("&")[0]
+            print('Нашли sitekey')
+            page_url = self.driver.current_url
+
+            # Решаем капчу через 2Captcha
+            result = solver.recaptcha(
+                sitekey=sitekey,
+                url=page_url,
+                method='userrecaptcha'
+            )
+            print('Капча решена, получен ответ от 2Captcha.')
+            
+            # Вводим решение капчи в соответствующее поле
+            recaptcha_response = self.driver.find_element(By.CSS_SELECTOR, "#g-recaptcha-response")
+            self.driver.execute_script("arguments[0].style.display = 'block';", recaptcha_response)  # Делаем поле видимым
+            recaptcha_response.send_keys(result['code'])
+            print('Ввод ответа в recaptcha_response')
+            
+            # Используем более общий селектор для поиска кнопки
+            print('Пытаемся найти кнопку submit')
+            submit_button = self.driver.find_element(By.XPATH, "//button[contains(text(), 'Submit') or contains(text(), 'Verify') or @id='recaptcha-verify-button']")
+            self.driver.execute_script("arguments[0].click();", submit_button)
+            print('Кнопка submit нажата')
+
+            print('Капча успешно решена и отправлена.')
+            
+            self.driver.switch_to.default_content()
+        except Exception as e:
+            print(f'Произошла ошибка при решении капчи: {e}')
 
     def add_cookies(self):
         try:
@@ -1223,7 +1243,6 @@ class CalendarAccountWidget(QWidget):
         self.proxy = proxy
         self.twitch_cookies = twitch_cookies
         self.reward_collected = False
-        self.thread_pool = QThreadPool()
         self.init_ui()
         self.thread = None
 
@@ -1251,8 +1270,9 @@ class CalendarAccountWidget(QWidget):
     @Slot()
     def start_calendar_parser(self):
         if self.thread is None:
-            task = CalendarParserTask(self.account_name, self.proxy, self.twitch_cookies)
-            self.thread_pool.start(task)
+            self.thread = CalendarParserThread(self.account_name, self.proxy, self.twitch_cookies, self)
+            self.thread.finished.connect(self.on_finished)
+            self.thread.start()
         else:
             print(f'Поток для {self.account_name} уже запущен')
 
@@ -1273,10 +1293,10 @@ class CalendarParserWindow(QMainWindow):
         self.setGeometry(100, 100, 550, 600)
         self.setWindowFlags(Qt.FramelessWindowHint)
         self.init_ui()
-        self.task_queue = queue.Queue()
         self.load_accounts()
         self.old_pos = None
         self.center_on_screen()
+        self.task_queue = Queue()
         self.is_running = False
 
     def init_ui(self):
@@ -1349,27 +1369,35 @@ class CalendarParserWindow(QMainWindow):
         
     def start_all_calendar_parsers(self):
         self.start_all_calendar_parsers_button.setText('Идёт сбор календаря...')
+        for index in range(self.account_list.count()):
+            item = self.account_list.item(index)
+            widget = self.account_list.itemWidget(item)
+            if not widget.reward_collected:
+                self.task_queue.put(widget)
+
         self.run_next_task()
 
     def run_next_task(self):
         if not self.task_queue.empty():
             widget = self.task_queue.get()
+            self.is_running = True
             if not hasattr(widget, 'thread') or widget.thread is None:
-                widget.thread = CalendarParserTask(widget.account_name, widget.proxy, widget.twitch_cookies)
-                widget.thread.signals.finished.connect(lambda: self.on_task_finished(widget))
-                widget.thread.run()  # Выполнение задачи в текущем потоке
-            else:
-                print(f'Поток для {widget.account_name} уже запущен')
+                widget.thread = CalendarParserThread(widget.account_name, widget.proxy, widget.twitch_cookies, self)
+                widget.thread.finished.connect(self.on_task_finished)
+                widget.thread.start()
+                #print(f'Запущен парсер для аккаунта: {widget.account_name}')
         else:
+            self.is_running = False
             self.start_all_calendar_parsers_button.setText('Сбор завершен')
 
     @Slot()
-    def on_task_finished(self, widget):
-        widget.thread = None
+    def on_task_finished(self):
+        #print('on_task_finished called')
+        self.kill_all_chrome_processes()
         self.run_next_task()
 
     def load_accounts(self):
-        user_id = UserManager.get_instance().get_user_id()
+        user_id = get_user_id()
         if user_id is None:
             print("User ID is not set. Cannot load accounts.")
             return
@@ -1397,7 +1425,6 @@ class CalendarParserWindow(QMainWindow):
         list_widget_item.setSizeHint(account_widget.sizeHint())
         self.account_list.addItem(list_widget_item)
         self.account_list.setItemWidget(list_widget_item, account_widget)
-        self.task_queue.put(account_widget)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and self.header.rect().contains(event.position().toPoint()):
@@ -1416,6 +1443,14 @@ class CalendarParserWindow(QMainWindow):
         window_geometry.moveCenter(center_point)
         self.move(window_geometry.topLeft())
         
+    def kill_all_chrome_processes(self):
+        for process in psutil.process_iter(['pid', 'name']):
+            if 'chrome' in process.info['name'].lower():
+                try:
+                    p = psutil.Process(process.info['pid'])
+                    p.kill()
+                except psutil.NoSuchProcess:
+                    pass
         
 # Менеджек аккаунтов     
 class AccountWidget(QWidget):
@@ -1477,7 +1512,7 @@ class AccountWidget(QWidget):
             self.delete_account()
 
     def delete_account(self):
-        user_id = UserManager.get_instance().get_user_id()
+        user_id = get_user_id()
         if user_id is None:
             QMessageBox.critical(self, "Error", "User ID is not set. Please login again.")
             return
@@ -1526,7 +1561,7 @@ class LoadAccountsThread(QThread):
                 sorted_accounts = sorted(accounts, key=lambda x: x['id'])
                 self.accounts_loaded.emit(sorted_accounts)
             else:
-                print(f"Не удалось загрузить акканту. Код ошибки: {response.status_code}")
+                print(f"Failed to load accounts. Status code: {response.status_code}")
         except requests.exceptions.RequestException as e:
             print(f"Request failed: {e}")
         except json.JSONDecodeError as e:
@@ -1650,7 +1685,7 @@ class AccountManagerWindow(QMainWindow):
         self.load_accounts() 
 
     def load_sub_account_settings_from_server(self):
-        user_id = UserManager.get_instance().get_user_id()
+        user_id = get_user_id()
         if user_id is None:
             print("User ID is not set. Cannot load sub-account settings.")
             return
@@ -1672,7 +1707,7 @@ class AccountManagerWindow(QMainWindow):
             print(f"JSON decode error: {e}")
 
     def save_selected_accounts(self):
-        user_id = UserManager.get_instance().get_user_id()
+        user_id = get_user_id()
         if user_id is None:
             print("User ID is not set. Cannot save selected accounts.")
             return
@@ -1729,7 +1764,7 @@ class AccountManagerWindow(QMainWindow):
             self.load_accounts()
 
     def load_accounts(self):
-        user_id = UserManager.get_instance().get_user_id()
+        user_id = get_user_id()
         if user_id is None:
             print("User ID is not set. Cannot load accounts.")
             return
@@ -1823,7 +1858,7 @@ class DataFetcherThread(QThread):
                     if not self.is_running:
                         return
                     if i == 1:
-                        user_id = UserManager.get_instance().get_user_id()
+                        user_id = get_user_id()
                         self.load_config()
                         sub_account_id = self.current_sub_account
                         params = {'user_id': user_id, 'sub_account_id': sub_account_id}
@@ -1853,13 +1888,13 @@ class DataFetcherThread(QThread):
                                 print(message)
                                 split_message = message.split()
                                 streamer = split_message[3]
-                                self.change_streamer_name_signal.emit(streamer)
+                                #self.change_streamer_name_signal.emit(streamer)
 
                             if 'Стрим на канале' in message:
                                 print(message)
                                 streamer = message.split()[-2]
-                                if 'Стрим на канале' in message:   
-                                    self.stream_is_over_signal.emit(streamer)
+                                # if 'Стрим на канале' in message:   
+                                #     self.stream_is_over_signal.emit(streamer)
 
                             if self.account_manager.are_drivers_running():
                                 self.account_manager.process_message(message)
@@ -1946,9 +1981,11 @@ class ChatWriterThread(QThread):
              
     def set_random_messages_enabled(self, enabled):
         self.random_messages_enabled = enabled
+        #print(f'[{self.account_name}] Рандомные сообщения включены: {self.random_messages_enabled}')
     
     def set_raffle_messages_enabled(self, enabled):
         self.raffle_messages_enabled = enabled
+        #print(f'[{self.account_name}] Основыные сообщения включены: {self.raffle_messages_enabled}')
     
     @Slot(str)
     def change_streamer_name(self, streamer):
@@ -1967,6 +2004,7 @@ class ChatWriterThread(QThread):
         else:
             self.streamer_name = 'bro'
         self.update_streamer_name_in_settings()
+
 
     def run(self):
         try:
@@ -2023,77 +2061,11 @@ class ChatWriterThread(QThread):
                             self.send_random_message()
 
                 time.sleep(1)
+
         except Exception as e:
-            print(f'Ошибка в методе run() [{self.account_name}]: {e}')
-        finally:
-            if self.driver:
-                self.driver.quit()
-                self.driver = None
-    
-    def get_chromedriver(self, use_proxy, user_agent=None):
-        try:
-            chrome_options = webdriver.ChromeOptions()
-            chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
+            print(f'Ошибка в методе run() [{self.account_name}] ')
+            #print(e)
 
-            if user_agent:
-                chrome_options.add_argument(f'--user-agent={user_agent}')
-            
-            chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-            chrome_options.add_argument('--incognito')
-            chrome_options.add_argument('--disable-infobars')
-            chrome_options.add_argument('--disable-notifications')
-            chrome_options.add_argument('--disable-popup-blocking')
-            chrome_options.add_argument('--disable-web-security')
-            chrome_options.add_argument('--allow-running-insecure-content')
-            chrome_options.add_argument('--disable-extensions')
-            chrome_options.add_argument('--profile-directory=Default')
-            chrome_options.add_argument('--ignore-certificate-errors')
-            chrome_options.add_argument('--no-sandbox')
-            chrome_options.add_argument('--disable-gpu')
-            chrome_options.add_argument('--disable-search-engine-choice-screen')
-            #chrome_options.add_argument('--headless')  # Запуск в headless режиме для снижения нагрузки
-            #chrome_options.add_argument('--remote-debugging-port=9222')  # Использование удаленной отладки
-            #chrome_options.add_argument('--single-process')  # Использование одного процесса
-            chrome_options.add_argument('--no-zygote')  # Отключение процесса zygote
-            chrome_options.add_argument('--renderer-process-limit=2')  # Ограничение количества процессов рендеринга
-            chrome_options.add_argument('--disable-dev-shm-usage')  # Использование /dev/shm в Docker
-            chrome_options.add_argument('--disable-software-rasterizer')  # Отключение программного растеризатора
-            chrome_options.add_argument('--disable-background-networking')  # Отключение фоновых сетевых операций
-            chrome_options.add_argument('--disable-background-timer-throttling')  # Отключение ограничения таймеров в фоне
-            chrome_options.add_argument('--disable-backgrounding-occluded-windows')  # Отключение окон в фоне
-            chrome_options.add_argument('--disable-renderer-backgrounding')  # Отключение фонового рендеринга
-            chrome_options.add_argument('--disable-client-side-phishing-detection')  # Отключение обнаружения фишинга на стороне клиента
-            chrome_options.add_argument('--disable-component-extensions-with-background-pages')  # Отключение компонентов с фоновыми страницами
-            chrome_options.add_argument('--disable-ipc-flooding-protection')  # Отключение защиты от флудирования IPC
-            chrome_options.add_argument('--disable-sync')  # Отключение синхронизации
-            chrome_options.add_argument('--metrics-recording-only')  # Запись только метрик
-            chrome_options.add_argument('--no-first-run')  # Отключение первого запуска
-            chrome_options.add_argument('--safebrowsing-disable-auto-update')  # Отключение автообновления SafeBrowsing
-            chrome_options.add_argument('--disable-hang-monitor')  # Отключение мониторинга зависаний
-            chrome_options.add_argument('--disable-prompt-on-repost')  # Отключение запроса на повторную отправку формы
-            chrome_options.add_argument('--disable-popup-blocking')  # Отключение блокировки всплывающих окон
-            chrome_options.add_argument('--disable-translate')  # Отключение автоматического перевода
-            chrome_options.add_argument('--disable-features=VizDisplayCompositor')  # Отключение VizDisplayCompositor для headless режима
-            chrome_options.add_argument('--disable-extensions')  # Отключение всех расширений
-
-            s = Service(executable_path='chromdriver/chromedriver.exe')
-
-            driver = webdriver.Chrome(service=s, options=chrome_options)
-
-            driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-                'source': '''
-                    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
-                    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
-                    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
-                    delete window.cdc_adoQpoasnfa76pfcZLmcfl_JSON;
-                    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Object;
-                    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Proxy;
-                '''
-            })
-            return driver
-        except Exception as e:
-            print(f'Ошибка при инициализации Chromedriver: {e}')
-            return None
 
     def check_priority_message(self):
         if self.priority_message:
@@ -2102,10 +2074,84 @@ class ChatWriterThread(QThread):
                 self.priority_message = None
             except Exception as e:
                 print(e)
-
+    
     @Slot(str)
     def set_priority_message(self, message):
         self.priority_message = message
+
+    def change_window_title(self, new_title):
+        try:
+            self.driver.execute_script(f'document.title = "{new_title}"')
+        except Exception as e:
+            print(f'Ошибка при изменении заголовка окна. {self.account_name}')
+
+    def close_cookies_banner(self):
+        wait = WebDriverWait(self.driver, 10)
+        banner_is_close = False
+        for i in range(5):
+            if not banner_is_close:
+                try:
+                    button2 = wait.until(EC.element_to_be_clickable((By.XPATH, '//*[@id="app"]/span/div/div[3]/button[1]')))
+                    button2.click()
+                    #print(f'Банер закрыт. [{self.account_name}]')
+                    banner_is_close = True
+                except Exception as e:
+                    print('Не удалось закрыть банер.')
+                time.sleep(1)
+            else:
+                break
+
+    def check_status(self):
+        if self.is_running:
+            return
+        else:
+            self.stop()
+
+    def check_cookies(self, site):
+        try:
+            self.driver.get(site)
+            self.avatar_element = self.driver.find_element(By.XPATH, '//*[@id="headlessui-menu-button-3"]/div/img')
+            if self.avatar_element:
+                self.cookie_is_loading = True
+                time.sleep(1)
+        except NoSuchElementException:
+            print(f'Аватарка не найдена. [{self.account_name}]')
+        return False
+
+    def add_cookies(self):
+        try:
+            cookies = json.loads(self.cookie)
+            for cookie in cookies:
+                if 'sameSite' in cookie and cookie['sameSite'] not in ['Strict', 'Lax', 'None']:
+                    cookie['sameSite'] = 'None'
+                self.driver.add_cookie(cookie)
+            #print('Куки успешно добавлены.')
+        except Exception as e:
+            print(f'Ошибка при добавлении кук: {e}')
+
+    def load_sent_messages(self):
+        if os.path.exists(self.sent_messages_file):
+            with open(self.sent_messages_file, 'r', encoding='utf-8') as file:
+                return file.read().splitlines()
+        return []
+
+    def save_sent_message(self, message):
+        with open(self.sent_messages_file, 'a', encoding='utf-8') as file:
+            file.write(message + '\n')
+
+    def send_random_message(self):
+        unsent_messages = [msg for msg in self.all_messages if self.sent_messages.count(msg) < self.all_messages.count(msg)]
+
+        if not unsent_messages:
+            self.sent_messages = []
+            unsent_messages = self.all_messages
+            with open(self.sent_messages_file, 'w', encoding='utf-8') as file:
+                file.write('')
+
+        random_message = random.choice(unsent_messages)
+        self.send_message_on_kick(random_message.format(streamer_name=self.streamer_name))
+        self.save_sent_message(random_message)
+        self.sent_messages.append(random_message)
 
     @Slot(str)
     def send_message_on_kick(self, message):
@@ -2143,93 +2189,63 @@ class ChatWriterThread(QThread):
         except Exception as e:
             print(f'Ошибка при поиске chat_input [{self.account_name}] ')
 
-    def change_window_title(self, new_title):
+
+    def get_chromedriver(self, use_proxy, user_agent=None):
         try:
-            self.driver.execute_script(f'document.title = "{new_title}"')
+            chrome_options = webdriver.ChromeOptions()
+            chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
+
+            if user_agent:
+                chrome_options.add_argument(f'--user-agent={user_agent}')
+            
+            if use_proxy:      
+                plugin_file = 'proxy_auth_plugin.zip'
+
+                with zipfile.ZipFile(plugin_file, 'w') as zp:
+                    zp.writestr('manifest.json', manifest_json)
+                    zp.writestr('background.js', background_js)
+
+                chrome_options.add_extension(plugin_file)
+
+            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+            chrome_options.add_argument('--ignore-certificate-errors')
+            chrome_options.add_argument("--disable-proxy-certificate-handler")
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--allow-running-insecure-content')
+
+            s = Service(executable_path='chromdriver/chromedriver.exe')
+
+            driver = webdriver.Chrome(service=s, options=chrome_options)
+
+            driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+                'source': '''
+                    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+                    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+                    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+                    delete window.cdc_adoQpoasnfa76pfcZLmcfl_JSON;
+                    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Object;
+                    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Proxy;
+                '''
+            })
+            return driver
         except Exception as e:
-            print(f'Ошибка при изменении заголовка окна. {self.account_name}')
+            print(f'Ошибка при инициализации Chromedriver: {e}')
+            return None
 
-    def send_random_message(self):
-        unsent_messages = [msg for msg in self.all_messages if self.sent_messages.count(msg) < self.all_messages.count(msg)]
-
-        if not unsent_messages:
-            self.sent_messages = []
-            unsent_messages = self.all_messages
-            with open(self.sent_messages_file, 'w', encoding='utf-8') as file:
-                file.write('')
-
-        random_message = random.choice(unsent_messages)
-        self.send_message_on_kick(random_message.format(streamer_name=self.streamer_name))
-        self.save_sent_message(random_message)
-        self.sent_messages.append(random_message)
-
-    def close_cookies_banner(self):
-        wait = WebDriverWait(self.driver, 10)
-        banner_is_close = False
-        for i in range(5):
-            if not banner_is_close:
-                try:
-                    button2 = wait.until(EC.element_to_be_clickable((By.XPATH, '//*[@id="app"]/span/div/div[3]/button[1]')))
-                    button2.click()
-                    #print(f'Банер закрыт. [{self.account_name}]')
-                    banner_is_close = True
-                except Exception as e:
-                    print('Не удалось закрыть банер.')
-                time.sleep(1)
-            else:
-                break
-
-    def check_status(self):
-        if self.is_running:
-            return
-        else:
-            self.stop()
-
-    def check_cookies(self, site):
-        try:
-            self.driver.get(site)
-            self.avatar_element = self.driver.find_element(By.XPATH, '//*[@id="headlessui-menu-button-3"]/div/img')
-            if self.avatar_element:
-                self.cookie_is_loading = True
-                time.sleep(1)
-        except NoSuchElementException:
-            print(f'Аватарка не найдена. [{self.account_name}]')
-        return False
-    
-    def load_sent_messages(self):
-        if os.path.exists(self.sent_messages_file):
-            with open(self.sent_messages_file, 'r', encoding='utf-8') as file:
-                return file.read().splitlines()
-        return []
-
-    def save_sent_message(self, message):
-        with open(self.sent_messages_file, 'a', encoding='utf-8') as file:
-            file.write(message + '\n')
-
-    def add_cookies(self):
-        try:
-            cookies = json.loads(self.cookie)
-            for cookie in cookies:
-                if 'expirationDate' in cookie:
-                    cookie['expiry'] = int(cookie['expirationDate'])
-                    del cookie['expirationDate']
-                if 'sameSite' in cookie and cookie['sameSite'] not in ['Strict', 'Lax', 'None']:
-                    cookie['sameSite'] = 'None'
-                self.driver.add_cookie(cookie)
-        except Exception as e:
-            print(f'Ошибка при добавлении кук: {e}')
-    
     @Slot(bool)
     def set_wg_active(self, state):
         self.wg_active = state
 
     def stop(self):
         self.is_running = False
-        if self.driver:
-            try:
-                self.driver.quit()
-            except Exception as e:
-                print(f'Ошибка при закрытии драйвера: {e}')
+        # if self.driver:
+        #     try:
+        #         self.driver.quit()
+        #     except Exception as e:
+        #         print(f'Ошибка при закрытии драйвера: {e}')
+        print(f'Поток {self.account_name} остановлен')
 
 class StreamerWindowManager:
     def __init__(self):
@@ -2390,7 +2406,7 @@ class OnStartAccountWidget(QWidget):
 
     def start_chat_writer(self):
         if self.thread is None or not self.thread.isRunning():
-            self.thread = ChatWriterThread(self.streamer, self.account_name, self.cookies, self.messages, self)
+            self.thread = ChatWriterThread(self.streamer, self.account_name, self.cookies, self.messages)
             self.thread.loaded_signal.connect(self.on_chat_writer_loaded)
             self.thread.driver_initialized.connect(self.on_driver_initialized)
             self.chat_writer_thread = self.thread
@@ -2498,7 +2514,7 @@ class OnStartAccountManagerWindow(QMainWindow):
                 self.current_sub_account = config.get('current_sub_account', 1)
                 
     def load_sub_account_settings_from_server(self):
-        user_id = UserManager.get_instance().get_user_id()
+        user_id = get_user_id()
         if user_id is None:
             print("User ID is not set. Cannot load sub-account settings.")
             return
@@ -2745,7 +2761,7 @@ class OnStartAccountManagerWindow(QMainWindow):
                     pass
 
     def load_accounts(self):
-        user_id = UserManager.get_instance().get_user_id()
+        user_id = get_user_id()
         if user_id is None:
             print("User ID is not set. Cannot load accounts.")
             return
@@ -2882,7 +2898,7 @@ class SettingsDialog(QDialog):
         self.streamer_label = QLabel("Выберите имя стримера:")
         self.streamer_label.setFont(font)
         self.streamer_combo = QComboBox()
-        self.streamer_combo.addItems(["ibby", "pkle", "hyus", "maxim", "sam", "henny", "bro"])
+        self.streamer_combo.addItems(["ibby", "pkle", "hyus", "maxim", "sam", "henny", "bro", "coolbreez"])
         self.streamer_combo.setFont(font)
         layout.addWidget(self.streamer_label)
         layout.addWidget(self.streamer_combo)
@@ -3006,12 +3022,14 @@ class MainApp(QMainWindow):
         
         self.apply_hover_styles()
         
+        
     def open_settings(self):
         dialog = SettingsDialog(self)
         if dialog.exec() == QDialog.Accepted:
             self.default_delay_from = dialog.delay_input_from.text()
             self.default_delay_to = dialog.delay_input_to.text()
             self.default_streamer = dialog.streamer_combo.currentText()
+            self.default_messages = dialog.default_message_input.toPlainText()
             self.apply_settings()
 
     def apply_settings(self):
@@ -3062,10 +3080,10 @@ class MainApp(QMainWindow):
     @Slot(str)
     def stop_all_drivers(self, streamer):
         print(f"Получен сигнал о завершении стрима для {streamer}. Останавливаем все драйверы.")
-        for widget in self.account_manager.account_widgets:
-            if widget.thread and widget.thread.isRunning():
-                widget.thread.stop()
-        self.kill_all_chrome_processes()
+        #for widget in self.account_manager.account_widgets:
+            #if widget.thread and widget.thread.isRunning():
+                #widget.thread.stop()
+        #self.kill_all_chrome_processes()
                 
     def kill_all_chrome_processes(self):
         for process in psutil.process_iter(['pid', 'name']):
@@ -3184,9 +3202,8 @@ class MainApp(QMainWindow):
         if response.status_code == 200:
             data = response.json()
             if data.get('result'):
+                global current_user_id
                 current_user_id = data.get('user_id') 
-                user_manager = UserManager.get_instance()
-                user_manager.set_user_id(current_user_id)
                 print(current_user_id)
                 self.ui.login_error_text.hide()
                 print("Login successful!")
